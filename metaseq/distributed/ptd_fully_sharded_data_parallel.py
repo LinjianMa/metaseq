@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import functools
 import contextlib
 import logging
 import os
@@ -25,6 +26,7 @@ try:
         BackwardPrefetch,
         CPUOffload,
     )
+    from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
     from fairscale.utils.testing import DummyProcessGroup
 
     has_FSDP = True
@@ -133,6 +135,76 @@ def fsdp_enable_wrap(
         yield
 
 
+def construct_fsdp(
+    model: torch.nn.Module, cfg: DistributedTrainingConfig, use_sharded_state: bool = False, **kwargs
+):
+    if cfg.memory_efficient_fp16:
+        assert cfg.fp16  # memory_efficient_fp16 should imply fp16
+    group = dist_utils.get_data_parallel_group()
+    if group is None and cfg.distributed_world_size == 1:
+        group = DummyProcessGroup(rank=0, size=1)
+    fsdp_config = {
+        "process_group": group,
+        "sharding_strategy": ShardingStrategy.SHARD_GRAD_OP
+        if cfg.no_reshard_after_forward
+        else ShardingStrategy.FULL_SHARD,  # SHARD_GRAD_OP, NO_SHARD, HYBRID_SHARD
+        "mixed_precision": MixedPrecision(
+            param_dtype=torch.float16,
+            reduce_dtype=torch.float32 if cfg.fp32_reduce_scatter else torch.float16,
+            buffer_dtype=torch.float16,
+        )
+        if cfg.fp16 and not cfg.memory_efficient_fp16
+        else None,
+        "cpu_offload": CPUOffload(offload_params=True) if cfg.cpu_offload else None,
+        "backward_prefetch": None
+        if cfg.backward_prefetch is None
+        else BackwardPrefetch.BACKWARD_PRE
+        if cfg.backward_prefetch == "pre"
+        else BackwardPrefetch.BACKWARD_POST,
+        **kwargs,
+    }
+    from metaseq.model_parallel.modules import (
+        ModelParallelTransformerDecoderLayer,
+    )
+    recursive_policy = functools.partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={ModelParallelTransformerDecoderLayer},
+    )
+    from torch.distributed.fsdp.wrap import (
+        always_wrap_policy,
+        ParamExecOrderPolicy,
+        HandleInitMode,
+    )
+    nonrecursive_policy = ParamExecOrderPolicy(
+        handle_init_mode=HandleInitMode.MODULE_LEVEL,
+        bucket_size=int(17000000 * 50 + 1),
+        module_level_group_policy=always_wrap_policy,
+    )
+    logger.info(f"fsdp_config is {fsdp_config}")
+    fsdp_model = FullyShardedDataParallel(
+        model,
+        use_sharded_state=use_sharded_state,
+        auto_wrap_policy=nonrecursive_policy,
+        **fsdp_config,
+    )
+    # activation checkpointing
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+        checkpoint_wrapper,
+        CheckpointImpl,
+        apply_activation_checkpointing_wrapper,
+    )
+    non_reentrant_wrapper = functools.partial(
+        checkpoint_wrapper,
+        offload_to_cpu=False,
+        checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+    )
+    check_fn = lambda submodule: isinstance(submodule, ModelParallelTransformerDecoderLayer)
+    apply_activation_checkpointing_wrapper(
+        fsdp_model, checkpoint_wrapper_fn=non_reentrant_wrapper, check_fn=check_fn
+    )
+    return fsdp_model
+
+
 def fsdp_wrap(module, min_num_params: Optional[int] = None, **kwargs):
     """
     Helper to wrap layers/modules in FSDP. This falls back to a no-op if
@@ -142,20 +214,23 @@ def fsdp_wrap(module, min_num_params: Optional[int] = None, **kwargs):
         module (nn.Module): module to (maybe) wrap
         min_num_params (int, Optional): minimum number of layer params to wrap
     """
-    try:
-        from torch.distributed.fsdp.wrap import wrap
+    return module
+    # try:
+    #     from torch.distributed.fsdp.wrap import wrap
 
-        if os.environ.get("RESHARD_OVERRIDE_PROCESS_GROUP", "False") == "True":
-            logger.info("Process group was None, overriding to DummyProcessGroup")
-            kwargs["process_group"] = DummyProcessGroup(rank=0, size=1)
+    #     if os.environ.get("RESHARD_OVERRIDE_PROCESS_GROUP", "False") == "True":
+    #         logger.info("Process group was None, overriding to DummyProcessGroup")
+    #         kwargs["process_group"] = DummyProcessGroup(rank=0, size=1)
 
-        if min_num_params is not None:
-            num_params = sum(p.numel() for p in module.parameters())
-            if num_params >= min_num_params:
-                return wrap(module, **kwargs)
-            else:
-                return module
-        else:
-            return wrap(module, **kwargs)
-    except ImportError:
-        return module
+    #     if min_num_params is not None:
+    #         logger.info(f"start to wrap {module} with {min_num_params}")
+    #         num_params = sum(p.numel() for p in module.parameters())
+    #         if num_params >= min_num_params:
+    #             return wrap(module, **kwargs)
+    #         else:
+    #             return module
+    #     else:
+    #         logger.info(f"start to wrap {module}")
+    #         return wrap(module, **kwargs)
+    # except ImportError:
+    #     return module

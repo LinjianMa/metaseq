@@ -232,14 +232,14 @@ def _spawn_helper(main, cfg, kwargs):
         # -1 because we offset by +1 inside distributed_main when using
         # spawn_helper
         retval = distributed_main(-1, main, cfg, kwargs)
-        spawncontext.join()
+        # spawncontext.join()
         return retval
     except (KeyboardInterrupt, Exception):
-        # weirdly KeyboardInterrupt is not an Exception
-        # propagate exceptions on the main node by killing workers
-        for p in spawncontext.processes:
-            if p.is_alive():
-                os.kill(p.pid, signal.SIGTERM)
+        # # weirdly KeyboardInterrupt is not an Exception
+        # # propagate exceptions on the main node by killing workers
+        # for p in spawncontext.processes:
+        #     if p.is_alive():
+        #         os.kill(p.pid, signal.SIGTERM)
         raise
 
 

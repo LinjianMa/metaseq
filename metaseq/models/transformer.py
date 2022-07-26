@@ -405,12 +405,27 @@ class TransformerDecoder(IncrementalDecoder):
 
         layers = []
         for i in range(args.decoder_layers):
-            layers.append(
-                self.build_decoder_layer(
+            if not hasattr(args, "tensor_parallel_init_model_on_gpu"):
+                logger.info(f"construct {i}th decoder layer with gpu and unload")
+                args.tensor_parallel_init_model_on_gpu = True
+                args.memory_efficient_fp16 = False
+                new_layer = self.build_decoder_layer(
                     args,
                     no_encoder_attn=no_encoder_attn,
                 )
-            )
+                new_layer.cpu()
+                delattr(args, "tensor_parallel_init_model_on_gpu")
+                delattr(args, "memory_efficient_fp16")
+                layers.append(new_layer)
+            else:
+                logger.info(f"construct {i}th decoder layer with gpu")
+                layers.append(
+                    self.build_decoder_layer(
+                        args,
+                        no_encoder_attn=no_encoder_attn,
+                    )
+                )
+
         if getattr(self.args, "fsdp_checkpoint_wrap_layer_frequency", 1) > 1:
             assert (
                 len(layers) % self.args.fsdp_checkpoint_wrap_layer_frequency == 0
@@ -524,6 +539,7 @@ class TransformerDecoder(IncrementalDecoder):
         return TransformerDecoderLayer(args, no_encoder_attn=no_encoder_attn)
 
     def build_decoder_layer(self, args, no_encoder_attn=False):
+        logger.info(f"args.memory_efficient_fp16 is {args.memory_efficient_fp16}")
         layer = self.build_base_decoder_layer(args, no_encoder_attn)
         for name, param in layer.named_parameters():
             _log_weight_stats(param, name)

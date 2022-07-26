@@ -286,7 +286,8 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
 
         if initialize_params_on_gpu:
-            assert getattr(args, "memory_efficient_fp16", False)
+            args.memory_efficient_fp16 = False
+            # assert getattr(args, "memory_efficient_fp16", False)
             self.self_attn_layer_norm = self.self_attn_layer_norm.cuda().half()
 
         if no_encoder_attn:
@@ -428,15 +429,16 @@ class TransformerDecoderLayer(nn.Module):
             need_weights=need_weights,
             attn_mask=attn_mask,
         )
-        if self.c_attn is not None:
-            tgt_len, bsz = x.size(0), x.size(1)
-            x = x.view(tgt_len, bsz, self.nh, self.head_dim)
-            x = torch.einsum("tbhd,h->tbhd", x, self.c_attn)
-            x = x.reshape(tgt_len, bsz, self.embed_dim)
-        x = self.dropout_module(x)
-        if self.attn_ln is not None:
-            x = self.attn_ln(x)
-        return self.residual_connection(x, residual), attn
+        return x, attn
+        # if self.c_attn is not None:
+        #     tgt_len, bsz = x.size(0), x.size(1)
+        #     x = x.view(tgt_len, bsz, self.nh, self.head_dim)
+        #     x = torch.einsum("tbhd,h->tbhd", x, self.c_attn)
+        #     x = x.reshape(tgt_len, bsz, self.embed_dim)
+        # x = self.dropout_module(x)
+        # if self.attn_ln is not None:
+        #     x = self.attn_ln(x)
+        # return self.residual_connection(x, residual), attn
 
     def forward(
         self,
@@ -519,35 +521,35 @@ class TransformerDecoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
 
-        if self.encoder_attn is not None and encoder_out is not None:
-            residual = x
-            if self.normalize_before:
-                x = self.encoder_attn_layer_norm(x)
-            if prev_attn_state is not None:
-                prev_key, prev_value = prev_attn_state[:2]
-                saved_state: Dict[str, Optional[Tensor]] = {
-                    "prev_key": prev_key,
-                    "prev_value": prev_value,
-                }
-                if len(prev_attn_state) >= 3:
-                    saved_state["prev_key_padding_mask"] = prev_attn_state[2]
-                assert incremental_state is not None
-                self.encoder_attn._set_input_buffer(incremental_state, saved_state)
+        # if self.encoder_attn is not None and encoder_out is not None:
+        #     residual = x
+        #     if self.normalize_before:
+        #         x = self.encoder_attn_layer_norm(x)
+        #     if prev_attn_state is not None:
+        #         prev_key, prev_value = prev_attn_state[:2]
+        #         saved_state: Dict[str, Optional[Tensor]] = {
+        #             "prev_key": prev_key,
+        #             "prev_value": prev_value,
+        #         }
+        #         if len(prev_attn_state) >= 3:
+        #             saved_state["prev_key_padding_mask"] = prev_attn_state[2]
+        #         assert incremental_state is not None
+        #         self.encoder_attn._set_input_buffer(incremental_state, saved_state)
 
-            x, attn = self.encoder_attn(
-                query=x,
-                key=encoder_out,
-                value=encoder_out,
-                key_padding_mask=encoder_padding_mask,
-                incremental_state=incremental_state,
-                static_kv=True,
-                need_weights=need_attn or (not self.training and self.need_attn),
-                need_head_weights=need_head_weights,
-            )
-            x = self.dropout_module(x)
-            x = self.residual_connection(x, residual)
-            if not self.normalize_before:
-                x = self.encoder_attn_layer_norm(x)
+        #     x, attn = self.encoder_attn(
+        #         query=x,
+        #         key=encoder_out,
+        #         value=encoder_out,
+        #         key_padding_mask=encoder_padding_mask,
+        #         incremental_state=incremental_state,
+        #         static_kv=True,
+        #         need_weights=need_attn or (not self.training and self.need_attn),
+        #         need_head_weights=need_head_weights,
+        #     )
+        #     x = self.dropout_module(x)
+        #     x = self.residual_connection(x, residual)
+        #     if not self.normalize_before:
+        #         x = self.encoder_attn_layer_norm(x)
         residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
