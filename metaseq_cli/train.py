@@ -93,18 +93,19 @@ def main(cfg: DictConfig) -> None:
     assert cfg.criterion, "Please specify criterion to train a model"
 
     # Build model and criterion
-    if cfg.distributed_training.ddp_backend in ["fully_sharded", "ptd_fully_sharded"]:
-        extra = {
-            "use_sharded_state": cfg.distributed_training.use_sharded_state,
-        }
-
-        with fsdp_enable_wrap(cfg.distributed_training, **extra):
-            model = fsdp_wrap(
-                task.build_model(cfg.model),
-                process_group=distributed_utils.get_data_parallel_group(),
-            )
-    else:
-        model = task.build_model(cfg.model)
+    extra = {
+        "use_sharded_state": cfg.distributed_training.use_sharded_state,
+        "process_group": distributed_utils.get_data_parallel_group(),
+        "device_id": torch.cuda.current_device(),
+    }
+    logger.info("start constructing the model")
+    model = task.build_model(cfg.model)
+    # Make all parameter type be the same.
+    model = model.to(torch.float16)
+    logger.info("start constructing the FSDP model")
+    from metaseq.distributed.ptd_fully_sharded_data_parallel import construct_fsdp
+    model = construct_fsdp(model, cfg.distributed_training, **extra)
+    logger.info(model)
     criterion = task.build_criterion(cfg.criterion)
 
     logger.info(model)
@@ -112,13 +113,13 @@ def main(cfg: DictConfig) -> None:
     logger.info("model: {}".format(model.__class__.__name__))
     logger.info("criterion: {}".format(criterion.__class__.__name__))
     logger.info(
-        "num. model params: {:,} (num. trained: {:,})".format(
-            sum(getattr(p, "_orig_size", p).numel() for p in model.parameters()),
+        "num. model params: {:,} M (num. trained: {:,}) M".format(
+            sum(getattr(p, "_orig_size", p).numel() for p in model.parameters())/1e6,
             sum(
                 getattr(p, "_orig_size", p).numel()
                 for p in model.parameters()
                 if p.requires_grad
-            ),
+            ) / 1e6,
         )
     )
     logger.info(metrics.get_nvidia_smi_gpu_memory_stats_str())
@@ -150,32 +151,10 @@ def main(cfg: DictConfig) -> None:
     )
     logger.info(metrics.get_nvidia_smi_gpu_memory_stats_str())
 
-    # Load the latest checkpoint if one is available and restore the
-    # corresponding train iterator
-    extra_state, epoch_itr = checkpoint_utils.load_checkpoint(
-        cfg.checkpoint,
-        trainer,
-        # don't cache epoch iterators for sharded datasets
-        disable_iterator_cache=True,
-    )
-
-    max_epoch = cfg.optimization.max_epoch or math.inf
+    epoch_itr = trainer.get_train_iterator(epoch=1, disable_iterator_cache=True)
     train_meter = meters.StopwatchMeter()
     train_meter.start()
-    while epoch_itr.next_epoch_idx <= max_epoch:
-        # train for one epoch
-        valid_losses, should_stop = train(cfg, trainer, task, epoch_itr)
-        if should_stop:
-            break
-
-        # only use first validation loss to update the learning rate
-        trainer.lr_step(epoch_itr.epoch, valid_losses[0])
-
-        epoch_itr = trainer.get_train_iterator(
-            epoch_itr.next_epoch_idx,
-            # don't cache epoch iterators for sharded datasets
-            disable_iterator_cache=True,
-        )
+    train(cfg, trainer, task, epoch_itr)
     train_meter.stop()
     logger.info("done training in {:.1f} seconds".format(train_meter.sum))
 
@@ -292,35 +271,28 @@ def train(
                 # the end-of-epoch stats will still be preserved
                 metrics.reset_meters("train_inner")
 
-        end_of_epoch = not itr.has_next()
-        valid_losses, should_stop = validate_and_save(
-            cfg,
-            trainer,
-            task,
-            epoch_itr,
-            valid_subsets,
-            end_of_epoch,
-            log_output is not None,
-        )
-
-        return valid_losses, should_stop
+    cuda_reserved_memory = []
+    cuda_reserved_memory_percent = []
+    timelist = []
+    max_iters = 3
+    logger.info(f"max iters is {max_iters}")
+    current_free, full_gpu_mem = torch.cuda.mem_get_info()
 
     for i, samples in enumerate(progress):
-        if (
-            distributed_utils.get_global_rank() == 0
-            and cfg.common.new_profiler
-            and i == 5
-        ):
-            logger.info("STARTING PROFILER")
-            with profiler.profile() as prof:
-                valid_losses, should_stop = train(i, samples)
-            torch.cuda.synchronize()
-            prof.export_chrome_trace(
-                os.path.join(cfg.checkpoint.save_dir, "profiler_trace.json")
-            )
-        else:
-            valid_losses, should_stop = train(i, samples)
-        if should_stop:
+        t0 = time.time()
+        logger.info(f"Start iterating over sample {i}")
+        train(i, samples)
+        cuda_reserved_memory.append(torch.cuda.memory_reserved()/1073741824)
+        cuda_reserved_memory_percent.append(torch.cuda.memory_reserved()/full_gpu_mem)
+        dt = time.time() - t0
+        timelist.append(dt)
+        logger.info(f"times are {timelist}")
+        cuda_max_reserved = torch.cuda.max_memory_reserved()/1073741824
+        logger.info(f"--> cuda max reserved memory = {cuda_max_reserved}")
+        logger.info(f"cuda reserved memory is {cuda_reserved_memory}")
+        logger.info(f"cuda reserved memory percent is {cuda_reserved_memory_percent}")
+        if i >= max_iters or should_stop:
+            logger.info(torch.cuda.memory_summary())
             break
 
     # log end-of-epoch stats
@@ -330,7 +302,6 @@ def train(
 
     # reset epoch-level meters
     metrics.reset_meters("train")
-    return valid_losses, should_stop
 
 
 def _flatten_config(cfg: DictConfig):
@@ -584,6 +555,7 @@ def cli_main(
             with torch.autograd.profiler.emit_nvtx():
                 distributed_utils.call_main(cfg, main)
     else:
+        logger.info(f"running without profile")
         distributed_utils.call_main(cfg, main)
 
 
