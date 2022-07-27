@@ -22,7 +22,6 @@ from metaseq.modules import (
     TransformerDecoderLayer,
     TransformerEncoderLayer,
 )
-from metaseq.modules.checkpoint_activations import checkpoint_wrapper
 
 logger = logging.getLogger(__name__)
 
@@ -80,31 +79,7 @@ class TransformerEncoder(BaseEncoder):
             self.layer_norm = None
 
     def build_encoder_layer(self, args):
-        layer = TransformerEncoderLayer(args)
-        checkpoint = getattr(args, "checkpoint_activations", False)
-        if checkpoint:
-            offload_to_cpu = getattr(args, "offload_activations", False)
-            distribute_checkpointed_activations = getattr(
-                args, "distribute_checkpointed_activations", False
-            )
-            layer = checkpoint_wrapper(
-                layer,
-                offload_to_cpu=offload_to_cpu,
-                distribute_checkpointed_activations=distribute_checkpointed_activations,
-            )
-        # if we are checkpointing, enforce that FSDP always wraps the
-        # checkpointed layer, regardless of layer size
-        min_params_to_wrap = (
-            getattr(args, "min_params_to_wrap", DEFAULT_MIN_PARAMS_TO_WRAP)
-            if not checkpoint
-            else 0
-        )
-        layer = fsdp_wrap(
-            layer,
-            min_num_params=min_params_to_wrap,
-            process_group=dist_utils.get_data_parallel_group(),
-        )
-        return layer
+        return TransformerEncoderLayer(args)
 
     def forward_embedding(
         self, src_tokens, token_embedding: Optional[torch.Tensor] = None
@@ -405,12 +380,29 @@ class TransformerDecoder(IncrementalDecoder):
 
         layers = []
         for i in range(args.decoder_layers):
-            layers.append(
-                self.build_decoder_layer(
+            if not hasattr(args, "tensor_parallel_init_model_on_gpu"):
+                # TODO (linjianma): this is a hacky way to same module-loading
+                # time. For large modules, initialization on CPU takes too long.
+                # Here we initialize on GPU, then offload the model to CPU.
+                logger.info(f"construct {i}th decoder layer with gpu and unload")
+                args.tensor_parallel_init_model_on_gpu = True
+                args.memory_efficient_fp16 = False
+                new_layer = self.build_decoder_layer(
                     args,
                     no_encoder_attn=no_encoder_attn,
                 )
-            )
+                new_layer.cpu()
+                delattr(args, "tensor_parallel_init_model_on_gpu")
+                delattr(args, "memory_efficient_fp16")
+                layers.append(new_layer)
+            else:
+                logger.info(f"construct {i}th decoder layer with gpu")
+                layers.append(
+                    self.build_decoder_layer(
+                        args,
+                        no_encoder_attn=no_encoder_attn,
+                    )
+                )
         if getattr(self.args, "fsdp_checkpoint_wrap_layer_frequency", 1) > 1:
             assert (
                 len(layers) % self.args.fsdp_checkpoint_wrap_layer_frequency == 0
@@ -420,29 +412,6 @@ class TransformerDecoder(IncrementalDecoder):
             ):
                 layer_block = TransformerDecoderMultiLayerBlockModule(
                     layers[i : i + self.args.fsdp_checkpoint_wrap_layer_frequency]
-                )
-                checkpoint = getattr(args, "checkpoint_activations", False)
-                if checkpoint:
-                    offload_to_cpu = getattr(args, "offload_activations", False)
-                    distribute_checkpointed_activations = getattr(
-                        args, "distribute_checkpointed_activations", False
-                    )
-                    layer_block = checkpoint_wrapper(
-                        layer_block,
-                        offload_to_cpu=offload_to_cpu,
-                        distribute_checkpointed_activations=distribute_checkpointed_activations,
-                    )
-                # if we are checkpointing, enforce that FSDP always wraps the
-                # checkpointed layer, regardless of layer size
-                min_params_to_wrap = (
-                    getattr(args, "min_params_to_wrap", DEFAULT_MIN_PARAMS_TO_WRAP)
-                    if not checkpoint
-                    else 0
-                )
-                layer_block = fsdp_wrap(
-                    layer_block,
-                    min_num_params=min_params_to_wrap,
-                    process_group=dist_utils.get_data_parallel_group(),
                 )
                 self.layers.append(layer_block)
         else:
@@ -529,29 +498,6 @@ class TransformerDecoder(IncrementalDecoder):
             _log_weight_stats(param, name)
         if getattr(args, "fsdp_checkpoint_wrap_layer_frequency", 1) > 1:
             return layer
-        checkpoint = getattr(args, "checkpoint_activations", False)
-        if checkpoint:
-            offload_to_cpu = getattr(args, "offload_activations", False)
-            distribute_checkpointed_activations = getattr(
-                args, "distribute_checkpointed_activations", False
-            )
-            layer = checkpoint_wrapper(
-                layer,
-                offload_to_cpu=offload_to_cpu,
-                distribute_checkpointed_activations=distribute_checkpointed_activations,
-            )
-        # if we are checkpointing, enforce that FSDP always wraps the
-        # checkpointed layer, regardless of layer size
-        min_params_to_wrap = (
-            getattr(args, "min_params_to_wrap", DEFAULT_MIN_PARAMS_TO_WRAP)
-            if not checkpoint
-            else 0
-        )
-        layer = fsdp_wrap(
-            layer,
-            min_num_params=min_params_to_wrap,
-            process_group=dist_utils.get_data_parallel_group(),
-        )
         return layer
 
     def forward_embedding(

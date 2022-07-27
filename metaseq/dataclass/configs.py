@@ -302,7 +302,12 @@ class DistributedTrainingConfig(MetaseqDataclass):
             "during backward pass"
         },
     )
-
+    use_non_recursive: bool = field(
+        default=False, metadata={"help": "whether to use non-recursive policy"}
+    )
+    checkpoint_activations: bool = field(
+        default=False, metadata={"help": "checkpoint activations at each layer"}
+    )
 
 @dataclass
 class DatasetConfig(MetaseqDataclass):

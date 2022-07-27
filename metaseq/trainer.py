@@ -42,6 +42,7 @@ class Trainer(object):
     """
 
     def __init__(self, cfg, task, model, criterion):
+        self.iter = 0
         self.cfg = cfg
         self.task = task
 
@@ -695,6 +696,16 @@ class Trainer(object):
     @metrics.aggregate("train")
     def train_step(self, samples, raise_oom=False):
         """Do forward, backward and parameter update."""
+        # TODO (linjianma): this is a warm-up iteration for non-recursive policy
+        # to get the parameter gradient ready order.
+        if self.iter == 0:
+            self.iter += 1
+            sample = samples[0]
+            sample, is_dummy_batch = self._prepare_sample(sample)
+            loss, sample_size, logging_output = self.criterion(self.model, sample)
+            loss.backward()
+            return
+        self.iter += 1
         self._set_seed()
         self.model.train()
         self.criterion.train()
@@ -704,6 +715,7 @@ class Trainer(object):
 
         # forward and backward pass
         logging_outputs, sample_size, ooms = [], 0, 0
+        logger.info(f"Length of samples is {len(samples)}")
         for i, sample in enumerate(samples):  # delayed update loop
             sample, is_dummy_batch = self._prepare_sample(sample)
 
