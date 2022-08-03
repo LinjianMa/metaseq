@@ -286,6 +286,7 @@ class TransformerDecoderLayer(nn.Module):
         self.self_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
 
         if initialize_params_on_gpu:
+            args.memory_efficient_fp16 = False
             self.self_attn_layer_norm = self.self_attn_layer_norm.cuda().half()
 
         if no_encoder_attn:

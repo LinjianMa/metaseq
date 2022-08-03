@@ -173,7 +173,7 @@ def construct_fsdp(
         )
         policy = ParamExecOrderPolicy(
             handle_init_mode=HandleInitMode.MODULE_LEVEL,
-            bucket_size=int(17000000 * 50 + 1),
+            bucket_size=cfg.bucket_size,
             module_level_group_policy=always_wrap_policy,
         )
     else:

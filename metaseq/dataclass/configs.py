@@ -308,6 +308,12 @@ class DistributedTrainingConfig(MetaseqDataclass):
     checkpoint_activations: bool = field(
         default=False, metadata={"help": "checkpoint activations at each layer"}
     )
+    bucket_size: int = field(
+        default=1,
+        metadata={
+            "help": "bucket size for non recursive wrapping",
+        },
+    )
 
 @dataclass
 class DatasetConfig(MetaseqDataclass):
