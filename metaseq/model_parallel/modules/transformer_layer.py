@@ -180,9 +180,13 @@ class ModelParallelTransformerDecoderLayer(TransformerDecoderLayer):
             attn_output = torch.einsum("tbhd,h->tbhd", attn_output, self.c_attn)
             attn_output = attn_output.reshape(tgt_len, bsz, self.embed_dim)
         if self.attn_ln is None:
-            x = bias_dropout_add_func(
-                attn_output, attn_bias.view(1, 1, -1), residual, self.args.dropout
-            )
+            x = attn_output + residual
+            # TODO (linjianma): this batch norm currently will fail for
+            # non-recursive wrapping. We need to debug this in detail to see
+            # what's the reason.
+            # x = bias_dropout_add_func(
+            #     attn_output, attn_bias.view(1, 1, -1), residual, self.args.dropout
+            # )
         else:
             x = torch.nn.functional.dropout(
                 attn_output + attn_bias.view(1, 1, -1),

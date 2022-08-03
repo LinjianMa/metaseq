@@ -73,9 +73,6 @@ class TransformerLanguageModelConfig(MetaseqDataclass):
     no_scale_embedding: bool = field(
         default=False, metadata={"help": "if True, dont scale embeddings"}
     )
-    checkpoint_activations: bool = field(
-        default=False, metadata={"help": "checkpoint activations at each layer"}
-    )
     offload_activations: bool = field(
         default=False,
         metadata={"help": "move checkpointed activations to CPU after they are used."},
